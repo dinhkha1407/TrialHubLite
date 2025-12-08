@@ -137,10 +137,30 @@ st.markdown("""
 
 def import_trials_from_file(uploaded_file):
     try:
+        # Read file without header first to find the correct row
         if uploaded_file.name.endswith('.csv'):
-            df_import = pd.read_csv(uploaded_file)
+            df_raw = pd.read_csv(uploaded_file, header=None, nrows=20)
         else:
-            df_import = pd.read_excel(uploaded_file)
+            df_raw = pd.read_excel(uploaded_file, header=None, nrows=20)
+            
+        # Detect header row index
+        header_idx = 0
+        found = False
+        for i, row in df_raw.iterrows():
+            row_str = row.astype(str).str.lower().tolist()
+            # Look for key columns
+            if any("stt" in x for x in row_str) and (any("sđt" in x for x in row_str) or any("phone" in x for x in row_str)):
+                header_idx = i
+                found = True
+                break
+        
+        # Reload with correct header
+        if uploaded_file.name.endswith('.csv'):
+            uploaded_file.seek(0)
+            df_import = pd.read_csv(uploaded_file, header=header_idx)
+        else:
+            uploaded_file.seek(0)
+            df_import = pd.read_excel(uploaded_file, header=header_idx)
             
         # Normalize columns
         # Map: STT->stt, Ngày/Date->trial_date, Thời gian/Time->time, Link->meet_link, 
@@ -160,6 +180,12 @@ def import_trials_from_file(uploaded_file):
             elif 'note' in c or 'ghi chú' in c: col_map[col] = 'note'
             elif 'phụ trách' in c or 'evaluator' in c: col_map[col] = 'evaluator'
             elif 'tvv' in c or 'creator' in c: col_map[col] = 'creator'
+            
+        df_import = df_import.rename(columns=col_map)
+        
+        # Drop empty rows where phone is missing (crucial for valid data)
+        if 'phone' in df_import.columns:
+            df_import = df_import[df_import['phone'].notna() & (df_import['phone'].astype(str).str.strip() != '')]
             
         df_import = df_import.rename(columns=col_map)
         
