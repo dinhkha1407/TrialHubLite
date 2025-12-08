@@ -148,8 +148,12 @@ def import_trials_from_file(uploaded_file):
         found = False
         for i, row in df_raw.iterrows():
             row_str = row.astype(str).str.lower().tolist()
-            # Look for key columns
-            if any("stt" in x for x in row_str) and (any("sđt" in x for x in row_str) or any("phone" in x for x in row_str)):
+            # Look for key columns: STT and (Phone or SĐT or Số điện thoại or Trial)
+            has_stt = any("stt" in x for x in row_str)
+            has_phone = any("phone" in x or "sđt" in x or "số điện thoại" in x for x in row_str)
+            has_trial = any("trial" in x for x in row_str)
+            
+            if has_stt and (has_phone or has_trial):
                 header_idx = i
                 found = True
                 break
