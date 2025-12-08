@@ -165,6 +165,10 @@ def import_trials_from_file(uploaded_file):
         else:
             uploaded_file.seek(0)
             df_import = pd.read_excel(uploaded_file, header=header_idx)
+
+        # Deduplicate columns (handle merged cells or duplicate headers)
+        df_import.columns = pd.io.parsers.ParserBase({'names': df_import.columns})._maybe_dedup_names(df_import.columns)
+
             
         # Normalize columns
         # Map: STT->stt, Ngày/Date->trial_date, Thời gian/Time->time, Link->meet_link, 
