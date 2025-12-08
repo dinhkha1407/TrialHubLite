@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
+
+# Virtual Env
+venv/
+env/
+
+# IMPORTANT: We specifically WANT to include the database for this project
+# trialhub.db is NOT ignored
