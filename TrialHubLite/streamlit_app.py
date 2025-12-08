@@ -176,23 +176,45 @@ def import_trials_from_file(uploaded_file):
 def get_connection():
     return sqlite3.connect("trialhub.db", check_same_thread=False)
 
+def init_db():
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stt TEXT,
+                trial_date TEXT,
+                time TEXT,
+                meet_link TEXT,
+                subject TEXT,
+                phone TEXT,
+                status TEXT,
+                note TEXT,
+                evaluator TEXT,
+                creator TEXT
+            )
+        """)
+        conn.commit()
+    except Exception as e:
+        st.error(f"DB Init Error: {e}")
+
+# Initialize DB on load
+init_db()
 conn = get_connection()
 
 # Use cache_data for performance, invalidate when data changes
 @st.cache_data(ttl=60) 
 def load_data():
     try:
-        # We use a new connection here to be safe with threading or just rely on the cached resource?
-        # Better to query and return DF.
         query = "SELECT * FROM trials ORDER BY id DESC"
-        # We can't pickle the sqlite connection easily if it's in the args, but here we use global 'conn'
-        # To make it robust with cache, we might want to just run the query.
-        # Note: pandas read_sql might need a fresh cursor or connection if the global one is closed (it shouldn't be).
         df = pd.read_sql(query, conn)
         return df
     except Exception as e:
-        st.error(f"Error loading data: {e}")
-        return pd.DataFrame()
+        # If table is missing despite init (weird), allow failing gracefully
+        st.error(f"Error loading data: {e}. Attempting to recreate table...")
+        init_db()
+        return pd.DataFrame(columns=['id', 'stt', 'trial_date', 'status', 'subject', 'phone', 'note'])
 
 def clear_cache():
     load_data.clear()
