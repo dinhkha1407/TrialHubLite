@@ -286,6 +286,126 @@ def import_trials_from_file(uploaded_file):
     except Exception as e:
         return None, str(e)
 
+# --- Database Functions ---
+@st.cache_resource
+def get_connection():
+    return sqlite3.connect("trialhub.db", check_same_thread=False)
+
+def init_db():
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stt TEXT,
+                trial_date TEXT,
+                time TEXT,
+                meet_link TEXT,
+                subject TEXT,
+                phone TEXT,
+                status TEXT,
+                note TEXT,
+                evaluator TEXT,
+                creator TEXT
+            )
+        """)
+        conn.commit()
+    except Exception as e:
+        st.error(f"DB Init Error: {e}")
+
+# Initialize DB on load
+init_db()
+conn = get_connection()
+
+# Use cache_data for performance, invalidate when data changes
+@st.cache_data(ttl=60) 
+def load_data():
+    try:
+        query = "SELECT * FROM trials ORDER BY id DESC"
+        df = pd.read_sql(query, conn)
+        return df
+    except Exception as e:
+        # If table is missing despite init (weird), allow failing gracefully
+        st.error(f"Error loading data: {e}. Attempting to recreate table...")
+        init_db()
+        return pd.DataFrame(columns=['id', 'stt', 'trial_date', 'status', 'subject', 'phone', 'note'])
+
+def clear_cache():
+    load_data.clear()
+
+def save_batch_changes(edited_rows, original_df):
+    """
+    Saves changes from st.data_editor's session state (edited_rows) to SQLite.
+    edited_rows is a dict: {row_index: {col_name: new_value, ...}}
+    Note: row_index corresponds to the index of the DataFrame passed to data_editor.
+    If filter is applied, we must ensure we map back to the correct DB ID.
+    We set existing dataframe index to 'id' before passing to editor to make this easy.
+    """
+    try:
+        cursor = conn.cursor()
+        count = 0
+        for row_id, changes in edited_rows.items():
+            # row_id is the primary key 'id' because we set df.index = id
+            updates = []
+            params = []
+            for col, val in changes.items():
+                updates.append(f"{col} = ?")
+                params.append(val)
+            
+            if updates:
+                params.append(row_id)
+                sql = f"UPDATE trials SET {', '.join(updates)} WHERE id = ?"
+                cursor.execute(sql, params)
+                count += 1
+                
+        conn.commit()
+        clear_cache() # Clear cache to refresh data next load
+        return count
+    except Exception as e:
+        st.error(f"Lỗi save batch: {e}")
+        return 0
+
+def update_single_row(row_id, data):
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE trials SET 
+            trial_date=?, time=?, meet_link=?, subject=?, phone=?, 
+            status=?, note=?, evaluator=?, creator=?
+            WHERE id=?
+        """, (
+            data['trial_date'], data['time'], data['meet_link'], 
+            data['subject'], data['phone'], data['status'], 
+            data['note'], data['evaluator'], data['creator'], 
+            row_id
+        ))
+        conn.commit()
+        clear_cache()
+        return True
+    except Exception as e:
+        st.error(f"Lỗi update row: {e}")
+        return False
+
+def add_trial(data):
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO trials (stt, trial_date, time, meet_link, subject, phone, status, note, evaluator, creator)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            data.get('stt'), data.get('trial_date'), data.get('time'), 
+            data.get('meet_link'), data.get('subject'), data.get('phone'), 
+            data.get('status'), data.get('note'), data.get('evaluator'), 
+            data.get('creator')
+        ))
+        conn.commit()
+        clear_cache()
+        return True
+    except Exception as e:
+        st.error(f"Error adding trial: {e}")
+        return False
+
 # --- Styling Logic (Global) ---
 def highlight_rows(row):
     status = str(row['status']).lower()
