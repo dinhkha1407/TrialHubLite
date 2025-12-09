@@ -446,6 +446,15 @@ with st.sidebar:
                             else:
                                 t_date = str(t_date).split(' ')[0] # Remove time if present
                                 
+                            # Handle time format (XLSX returns datetime.time)
+                            t_time = row.get('time', '')
+                            from datetime import time as dt_time
+                            if isinstance(t_time, dt_time):
+                                t_time = t_time.strftime("%H:%M")
+                            else:
+                                t_time = str(t_time).strip()
+                                if t_time == 'nan': t_time = ''
+                                
                             # Simple duplicate check
                             cursor.execute("SELECT id FROM trials WHERE phone=? AND trial_date=?", (phone, t_date))
                             if cursor.fetchone():
@@ -455,7 +464,7 @@ with st.sidebar:
                                 INSERT INTO trials (stt, trial_date, time, meet_link, subject, phone, status, note, evaluator, creator)
                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """, (
-                                row.get('stt', ''), t_date, row.get('time', ''), 
+                                row.get('stt', ''), t_date, t_time, 
                                 row.get('meet_link', ''), row.get('subject', ''), phone, 
                                 row.get('status', 'Chờ trial'), row.get('note', ''), 
                                 row.get('evaluator', ''), st.session_state.user_name
