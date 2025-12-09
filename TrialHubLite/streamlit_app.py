@@ -164,7 +164,7 @@ def import_trials_from_file(uploaded_file):
             df_import = pd.read_csv(uploaded_file, header=header_idx)
         else:
             uploaded_file.seek(0)
-            # keep_default_na=False to better handle empty strings vs actual NaNs if needed
+            # keep_default_na=False to better handle empty strings vs actual NaNs
             df_import = pd.read_excel(uploaded_file, header=header_idx)
 
         # Deduplicate columns manually
@@ -184,7 +184,7 @@ def import_trials_from_file(uploaded_file):
         col_map = {}
         used_targets = {}
         
-        # Keywords mapping
+        # Keywords mapping (Case-insensitive)
         keywords = {
             'stt': ['stt', 'số thứ tự', 'no'],
             'trial_date': ['ngày', 'date', 'day'],
@@ -194,8 +194,8 @@ def import_trials_from_file(uploaded_file):
             'phone': ['sđt', 'phone', 'số điện thoại', 'tel', 'mobile'],
             'status': ['tình trạng', 'status', 'trạng thái', 'kết quả'],
             'note': ['note', 'ghi chú', 'nhận xét', 'comment'],
-            'evaluator': ['phụ trách', 'evaluator', 'người đánh giá', 'gv', 'giáo viên'],
-            'creator': ['tvv', 'creator', 'người tạo', 'sale', 'tư vấn viên']
+            'evaluator': ['phụ trách', 'evaluator', 'người đánh giá', 'gv', 'giáo viên', 'đánh giá'],
+            'creator': ['tvv', 'creator', 'người tạo', 'sale', 'tư vấn viên', 'nguoi tao']
         }
 
         for col in df_import.columns:
@@ -227,7 +227,7 @@ def import_trials_from_file(uploaded_file):
         for c in ffill_cols:
             if c in df_import.columns:
                 # Ensure emptiness is standard NaN
-                df_import[c] = df_import[c].replace(r'^\s*$', pd.NA, regex=True).replace(['nan', 'NaN'], pd.NA)
+                df_import[c] = df_import[c].replace(r'^\s*$', pd.NA, regex=True).replace(['nan', 'NaN', 'None'], pd.NA)
                 
                 # Create mask
                 empty_mask = df_import[c].isna()
@@ -249,6 +249,24 @@ def import_trials_from_file(uploaded_file):
         if 'phone' in df_import.columns:
             df_import = df_import[df_import['phone'].astype(str).str.strip() != '']
             
+        # --- Value Cleaning & Type Conversion ---
+
+        # NOTE Preservation
+        if 'note' in df_import.columns:
+            df_import['note'] = df_import['note'].astype(str)
+            # Replace string 'nan' (case insensitive) with empty, but keep others
+            df_import['note'] = df_import['note'].replace(r'(?i)^nan$', '', regex=True)
+            # Don't strip excessively to preserve format, just None check
+            
+        # SUBJECT Cleaning
+        if 'subject' in df_import.columns:
+             df_import['subject'] = df_import['subject'].astype(str).replace(r'(?i)^nan$', '', regex=True).replace('None', '')
+        
+        # CREATOR/EVALUATOR Cleaning
+        for c in ['creator', 'evaluator']:
+             if c in df_import.columns:
+                 df_import[c] = df_import[c].astype(str).replace(r'(?i)^nan$', '', regex=True).replace('None', '')
+                 
         # --- Robust Date/Time Parsing ---
         
         # Parse Date
@@ -285,7 +303,6 @@ def import_trials_from_file(uploaded_file):
         return df_import, missing
     except Exception as e:
         return None, str(e)
-
 # --- Database Functions ---
 @st.cache_resource
 def get_connection():
@@ -480,6 +497,7 @@ with st.sidebar:
 
     st.markdown("---")
 
+    # --- 2. Import Excel/CSV ---
     with st.expander("📥 Import Trial từ Excel/CSV", expanded=False):
         uploaded_file = st.file_uploader("Chọn file .xlsx hoặc .csv", type=['xlsx', 'csv'])
         
@@ -492,40 +510,36 @@ with st.sidebar:
                 st.caption("Xem trước (Đã xử lý gộp dòng & chuẩn hóa):")
                 
                 # --- Highlighting Logic for Preview ---
-                # We want to highlight cells that were ffilled.
-                # Specifically, check the '_ffilled_cells' column.
-                
                 def highlight_auto_filled(row):
-                    # Default style
                     styles = [''] * len(row)
-                    
                     filled_cols = row.get('_ffilled_cells', [])
                     if not filled_cols:
                         return styles
-                        
                     for col_name in filled_cols:
                         try:
-                            # Verify if column exists in the slice (sometimes styling slices)
-                            # Get integer index of column
                             idx = row.index.get_loc(col_name)
-                            styles[idx] = 'background-color: #fef9c3; color: #854d0e; font-style: italic;' # Light yellow
+                            styles[idx] = 'background-color: #fef9c3; color: #854d0e; font-style: italic;' 
                         except:
                             pass
                     return styles
 
-                # Display DataFrame with style
-                # Drop the hidden tracker column for display, but use it for applying style is hard if dropped.
-                # So we pass the whole DF to styled, then hide valid columns? 
-                # Easier: Just apply logic and then hide '_ffilled_cells' using .hide() if Streamlit supports, 
-                # or just ignore it visually. Streamlit st.dataframe handles pandas styler.
-                
                 # Create styled object
                 try:
+                    # Config columns to show nicely
+                    # Hide _ffilled_cells column, make Note column wide
                     styler = df_preview_raw.style.apply(highlight_auto_filled, axis=1)
-                    # Note: We should ideally hide '_ffilled_cells' but st.dataframe doesn't fully support .hide() on all versions perfectly
-                    # Let's simple show it or ignore. It's helpful debug info actually.
-                    # Or drop it from display via column config if we use st.dataframe(styler)
-                    st.dataframe(styler, height=200, use_container_width=True)
+                    
+                    st.dataframe(
+                        styler, 
+                        height=200, 
+                        use_container_width=True,
+                        column_config={
+                            '_ffilled_cells': None, # Hide
+                            'note': st.column_config.TextColumn("Ghi chú", width="medium"),
+                            'evaluator': st.column_config.TextColumn("Người đánh giá"),
+                            'creator': st.column_config.TextColumn("Người tạo")
+                        }
+                    )
                     
                     # Count total auto-filled
                     total_filled = df_preview_raw['_ffilled_cells'].apply(len).sum()
@@ -538,6 +552,14 @@ with st.sidebar:
                 if missing:
                     st.warning(f"Thiếu cột: {', '.join(missing)}")
                     st.info("Các cột này sẽ để trống.")
+
+                # Check specifically for Note/Evaluator presence
+                warn_missing = []
+                if 'note' not in df_preview_raw.columns: warn_missing.append("Note / Ghi chú")
+                if 'evaluator' not in df_preview_raw.columns: warn_missing.append("Evaluator / Phụ trách")
+                
+                if warn_missing:
+                    st.warning(f"⚠️ Cảnh báo: Không tìm thấy cột {', '.join(warn_missing)}! Hãy kiểm tra tên cột trong file Excel.")
                 
                 if st.button("🚀 Import vào database", type="primary"):
                     try:
@@ -564,9 +586,8 @@ with st.sidebar:
                                 skipped += 1
                                 continue
                             
-                            # Handle Creator (Use file value OR Session User)
+                            # Handle Creator
                             creator = row.get('creator', '')
-                            # If it was ffilled, it has a value. If it was truly empty (no predecessor), it's empty.
                             if not creator: 
                                 creator = st.session_state.user_name
                             else:
@@ -583,7 +604,7 @@ with st.sidebar:
                                 row.get('subject', ''), 
                                 phone, 
                                 row.get('status', 'Chờ trial'), 
-                                row.get('note', ''), # Note is NEVER ffilled now
+                                row.get('note', ''), 
                                 row.get('evaluator', ''), 
                                 creator
                             ))
@@ -591,9 +612,12 @@ with st.sidebar:
                         conn.commit()
                         clear_cache() # Clear cache immediately
                         
-                        st.success(f"✅ Đã import: {count} dòng.")
+                        st.success(f"✅ Đã import thành công: {count} dòng.")
+                        st.info(f"ℹ️ Tự động điền dữ liệu ô gộp cho {total_filled} ô.")
+                        st.caption("Note & Evaluator preserved.")
+
                         if skipped > 0:
-                            st.warning(f"⚠️ Bỏ qua: {skipped} dòng (Do trùng dữ liệu, thiếu ngày/SĐT hoặc định dạng ngày sai).")
+                            st.warning(f"⚠️ Bỏ qua: {skipped} dòng (Do trùng dữ liệu hoặc thiếu thông tin).")
                         
                         st.balloons()
                         st.toast(f"Dữ liệu cập nhật lúc {datetime.now().strftime('%H:%M')}", icon="🕒")
