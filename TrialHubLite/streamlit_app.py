@@ -148,7 +148,6 @@ def import_trials_from_file(uploaded_file):
         found = False
         for i, row in df_raw.iterrows():
             row_str = row.astype(str).str.lower().tolist()
-            # Look for key columns: STT and (Phone or SĐT or Số điện thoại or Trial)
             # More robust check
             has_stt = any(x in str(s) for s in row_str for x in ["stt", "số thứ tự", "no."])
             has_phone = any(x in str(s) for s in row_str for x in ["phone", "sđt", "số điện thoại", "tel"])
@@ -165,6 +164,7 @@ def import_trials_from_file(uploaded_file):
             df_import = pd.read_csv(uploaded_file, header=header_idx)
         else:
             uploaded_file.seek(0)
+            # keep_default_na=False to better handle empty strings vs actual NaNs if needed
             df_import = pd.read_excel(uploaded_file, header=header_idx)
 
         # Deduplicate columns manually
@@ -217,194 +217,74 @@ def import_trials_from_file(uploaded_file):
             
         df_import = df_import.rename(columns=col_map)
         
-        # --- Handle Merged Cells (Forward Fill) ---
-        # Columns that typically span multiple rows in Excel (Date, Subject, Creator, etc.)
-        ffill_cols = ['trial_date', 'subject', 'evaluator', 'creator', 'meet_link', 'note', 'time']
+        # --- SELECTIVE FFILL (Merged Cells Logic) ---
+        # 1. Forward-fill ONLY these specific columns
+        ffill_cols = ['trial_date', 'creator', 'evaluator']
         
+        # Track filled cells
+        df_import['_ffilled_cells'] = [[] for _ in range(len(df_import))]
+
         for c in ffill_cols:
             if c in df_import.columns:
-                # Replace empty strings/nan strings with actual NaN to fallback
+                # Ensure emptiness is standard NaN
                 df_import[c] = df_import[c].replace(r'^\s*$', pd.NA, regex=True).replace(['nan', 'NaN'], pd.NA)
+                
+                # Create mask
+                empty_mask = df_import[c].isna()
+                
+                # Apply fill
                 df_import[c] = df_import[c].ffill()
+                
+                # Identify changes
+                filled_mask = empty_mask & df_import[c].notna()
+                
+                if filled_mask.any():
+                     df_import.loc[filled_mask, '_ffilled_cells'] = df_import.loc[filled_mask, '_ffilled_cells'].apply(lambda x: x + [c])
+                     
+        # Fill remaining NAs with empty string
+        df_import = df_import.fillna('')
 
-        # Drop empty rows where phone is missing (crucial for valid data)
-        # Phone should NOT be ffilled usually (each trial needs a student phone)
+        # Drop empty rows where phone is missing (crucial logic)
+        # We don't want to ffill phone, so if it's missing it's invalid
         if 'phone' in df_import.columns:
-            df_import = df_import[df_import['phone'].notna() & (df_import['phone'].astype(str).str.strip() != '') & (df_import['phone'].astype(str).str.lower() != 'nan')]
+            df_import = df_import[df_import['phone'].astype(str).str.strip() != '']
             
         # --- Robust Date/Time Parsing ---
         
         # Parse Date
         if 'trial_date' in df_import.columns:
-            # First clean strings
             df_import['trial_date'] = df_import['trial_date'].astype(str).str.strip()
-            # COERCE errors to NaT, assumption: Day First (VN format common)
-            # using format='mixed' allows 2025-10-19 and 19/10/2025 to likely coexist
             df_import['trial_date_parsed'] = pd.to_datetime(df_import['trial_date'], dayfirst=True, errors='coerce', format='mixed')
-            
-            # Update valid dates to string format for DB: DD/MM/YYYY
-            df_import['trial_date'] = df_import['trial_date_parsed'].dt.strftime("%d/%m/%Y")
-            
-            # Fill NaN
-            df_import['trial_date'] = df_import['trial_date'].fillna('')
+            df_import['trial_date'] = df_import['trial_date_parsed'].dt.strftime("%d/%m/%Y").fillna('')
         
         # Parse Time
         if 'time' in df_import.columns:
-             # Standardize various inputs: datetime.time, strings like "18h30", "18:00"
             def clean_time(val):
-                if pd.isna(val) or val == '' or str(val).lower() == 'nan':
-                    return ''
+                if not val: return ''
+                val_str = str(val).lower().strip()
+                if val_str == 'nan': return ''
                 
-                # If datetime.time
                 from datetime import time as dt_time
                 if isinstance(val, dt_time):
                     return val.strftime("%H:%M")
                 
-                s = str(val).lower().strip()
-                s = s.replace('h', ':').replace('g', ':').replace('.', ':')
-                
-                # Check format "HH:MM"
+                s = val_str.replace('h', ':').replace('g', ':').replace('.', ':')
                 try:
-                    # If just "18", assume 18:00? Maybe not safe.
-                    if s.isdigit() and len(s) <= 2:
-                        return f"{int(s):02d}:00"
-                        
+                    if s.isdigit() and len(s) <= 2: return f"{int(s):02d}:00"
                     t = datetime.strptime(s, "%H:%M")
                     return t.strftime("%H:%M")
                 except:
-                    # Pass through if robust parser fails, user can edit later
                     pass
                 return s 
             
             df_import['time'] = df_import['time'].apply(clean_time)
             
-        # Ensure required columns exist
         required_cols = ['trial_date', 'phone', 'subject', 'status']
         missing = [c for c in required_cols if c not in df_import.columns]
         
         return df_import, missing
     except Exception as e:
         return None, str(e)
-
-# --- Database Functions ---
-@st.cache_resource
-def get_connection():
-    return sqlite3.connect("trialhub.db", check_same_thread=False)
-
-def init_db():
-    try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS trials (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                stt TEXT,
-                trial_date TEXT,
-                time TEXT,
-                meet_link TEXT,
-                subject TEXT,
-                phone TEXT,
-                status TEXT,
-                note TEXT,
-                evaluator TEXT,
-                creator TEXT
-            )
-        """)
-        conn.commit()
-    except Exception as e:
-        st.error(f"DB Init Error: {e}")
-
-# Initialize DB on load
-init_db()
-conn = get_connection()
-
-# Use cache_data for performance, invalidate when data changes
-@st.cache_data(ttl=60) 
-def load_data():
-    try:
-        query = "SELECT * FROM trials ORDER BY id DESC"
-        df = pd.read_sql(query, conn)
-        return df
-    except Exception as e:
-        # If table is missing despite init (weird), allow failing gracefully
-        st.error(f"Error loading data: {e}. Attempting to recreate table...")
-        init_db()
-        return pd.DataFrame(columns=['id', 'stt', 'trial_date', 'status', 'subject', 'phone', 'note'])
-
-def clear_cache():
-    load_data.clear()
-
-def save_batch_changes(edited_rows, original_df):
-    """
-    Saves changes from st.data_editor's session state (edited_rows) to SQLite.
-    edited_rows is a dict: {row_index: {col_name: new_value, ...}}
-    Note: row_index corresponds to the index of the DataFrame passed to data_editor.
-    If filter is applied, we must ensure we map back to the correct DB ID.
-    We set existing dataframe index to 'id' before passing to editor to make this easy.
-    """
-    try:
-        cursor = conn.cursor()
-        count = 0
-        for row_id, changes in edited_rows.items():
-            # row_id is the primary key 'id' because we set df.index = id
-            updates = []
-            params = []
-            for col, val in changes.items():
-                updates.append(f"{col} = ?")
-                params.append(val)
-            
-            if updates:
-                params.append(row_id)
-                sql = f"UPDATE trials SET {', '.join(updates)} WHERE id = ?"
-                cursor.execute(sql, params)
-                count += 1
-                
-        conn.commit()
-        clear_cache() # Clear cache to refresh data next load
-        return count
-    except Exception as e:
-        st.error(f"Lỗi save batch: {e}")
-        return 0
-
-def update_single_row(row_id, data):
-    try:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE trials SET 
-            trial_date=?, time=?, meet_link=?, subject=?, phone=?, 
-            status=?, note=?, evaluator=?, creator=?
-            WHERE id=?
-        """, (
-            data['trial_date'], data['time'], data['meet_link'], 
-            data['subject'], data['phone'], data['status'], 
-            data['note'], data['evaluator'], data['creator'], 
-            row_id
-        ))
-        conn.commit()
-        clear_cache()
-        return True
-    except Exception as e:
-        st.error(f"Lỗi update row: {e}")
-        return False
-
-def add_trial(data):
-    try:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO trials (stt, trial_date, time, meet_link, subject, phone, status, note, evaluator, creator)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            data.get('stt'), data.get('trial_date'), data.get('time'), 
-            data.get('meet_link'), data.get('subject'), data.get('phone'), 
-            data.get('status'), data.get('note'), data.get('evaluator'), 
-            data.get('creator')
-        ))
-        conn.commit()
-        clear_cache()
-        return True
-    except Exception as e:
-        st.error(f"Error adding trial: {e}")
-        return False
 
 # --- Styling Logic (Global) ---
 def highlight_rows(row):
@@ -480,18 +360,60 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # --- 2. Import Excel/CSV ---
     with st.expander("📥 Import Trial từ Excel/CSV", expanded=False):
         uploaded_file = st.file_uploader("Chọn file .xlsx hoặc .csv", type=['xlsx', 'csv'])
         
         if uploaded_file:
-            df_preview, missing = import_trials_from_file(uploaded_file)
+            df_preview_raw, missing = import_trials_from_file(uploaded_file)
             
             if isinstance(missing, str): # Error message
                 st.error(f"Lỗi đọc file: {missing}")
             else:
-                st.caption("Xem trước 5 dòng đầu:")
-                st.dataframe(df_preview.head(5), height=150)
+                st.caption("Xem trước (Đã xử lý gộp dòng & chuẩn hóa):")
+                
+                # --- Highlighting Logic for Preview ---
+                # We want to highlight cells that were ffilled.
+                # Specifically, check the '_ffilled_cells' column.
+                
+                def highlight_auto_filled(row):
+                    # Default style
+                    styles = [''] * len(row)
+                    
+                    filled_cols = row.get('_ffilled_cells', [])
+                    if not filled_cols:
+                        return styles
+                        
+                    for col_name in filled_cols:
+                        try:
+                            # Verify if column exists in the slice (sometimes styling slices)
+                            # Get integer index of column
+                            idx = row.index.get_loc(col_name)
+                            styles[idx] = 'background-color: #fef9c3; color: #854d0e; font-style: italic;' # Light yellow
+                        except:
+                            pass
+                    return styles
+
+                # Display DataFrame with style
+                # Drop the hidden tracker column for display, but use it for applying style is hard if dropped.
+                # So we pass the whole DF to styled, then hide valid columns? 
+                # Easier: Just apply logic and then hide '_ffilled_cells' using .hide() if Streamlit supports, 
+                # or just ignore it visually. Streamlit st.dataframe handles pandas styler.
+                
+                # Create styled object
+                try:
+                    styler = df_preview_raw.style.apply(highlight_auto_filled, axis=1)
+                    # Note: We should ideally hide '_ffilled_cells' but st.dataframe doesn't fully support .hide() on all versions perfectly
+                    # Let's simple show it or ignore. It's helpful debug info actually.
+                    # Or drop it from display via column config if we use st.dataframe(styler)
+                    st.dataframe(styler, height=200, use_container_width=True)
+                    
+                    # Count total auto-filled
+                    total_filled = df_preview_raw['_ffilled_cells'].apply(len).sum()
+                    if total_filled > 0:
+                        st.info(f"✨ Đã tự động điền {total_filled} ô bị trống do gộp dòng (Màu vàng nhạt).")
+                        
+                except Exception as ex:
+                    st.dataframe(df_preview_raw.head(5)) # Fallback
                 
                 if missing:
                     st.warning(f"Thiếu cột: {', '.join(missing)}")
@@ -503,7 +425,7 @@ with st.sidebar:
                         count = 0
                         skipped = 0
                         
-                        for _, row in df_preview.iterrows():
+                        for _, row in df_preview_raw.iterrows():
                             # Clean Phone
                             phone = str(row.get('phone', '')).strip()
                             if phone.lower() == 'nan': phone = ''
@@ -524,7 +446,8 @@ with st.sidebar:
                             
                             # Handle Creator (Use file value OR Session User)
                             creator = row.get('creator', '')
-                            if pd.isna(creator) or str(creator).strip() == '' or str(creator).lower() == 'nan':
+                            # If it was ffilled, it has a value. If it was truly empty (no predecessor), it's empty.
+                            if not creator: 
                                 creator = st.session_state.user_name
                             else:
                                 creator = str(creator).strip()
@@ -540,7 +463,7 @@ with st.sidebar:
                                 row.get('subject', ''), 
                                 phone, 
                                 row.get('status', 'Chờ trial'), 
-                                row.get('note', ''), 
+                                row.get('note', ''), # Note is NEVER ffilled now
                                 row.get('evaluator', ''), 
                                 creator
                             ))
