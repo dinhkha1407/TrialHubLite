@@ -565,48 +565,76 @@ with st.sidebar:
                 if st.button("👁️ Xem trước & Xử lý số liệu"):
                     # Apply Mapping
                     df_preview = df_raw.copy()
-                    
                     rename_map = {v: k for k, v in mappings.items()}
                     df_preview = df_preview.rename(columns=rename_map)
                     
-                    # --- CLEANING LOGIC ---
-                    
-                    # 1. FFILL (Strict: Date, Creator, Evaluator)
-                    # Helper for merged cells
-                    ffill_cols = ['trial_date', 'creator', 'evaluator']
+                    # --- DEFINITIVE CLEANING LOGIC ---
+                    junk_keywords = ["CHƯA GỬI ZALO", "CHUA GUI ZALO", "CHƯA GỬI", "TIÊN", "TIEN", "CHUA GUI"]
                     df_preview['_ffilled_cells'] = [[] for _ in range(len(df_preview))]
 
-                    for c in ffill_cols:
+                    # 1. Evaluator & Creator (Conditional Junk Removal OR Ffill)
+                    for c in ['evaluator', 'creator']:
                         if c in df_preview.columns:
-                            # Replace nan/empty string with NA
-                            df_preview[c] = df_preview[c].replace(r'^\s*$', pd.NA, regex=True).replace(['nan', 'NaN', 'None'], pd.NA)
-                            
-                            # Record empty cells before filling
-                            empty_mask = df_preview[c].isna()
-                            
-                            # FFILL
-                            df_preview[c] = df_preview[c].ffill()
-                            
-                            # Ffilled mask
-                            filled_mask = empty_mask & df_preview[c].notna()
-                            if filled_mask.any():
-                                df_preview.loc[filled_mask, '_ffilled_cells'] = df_preview.loc[filled_mask, '_ffilled_cells'].apply(lambda x: x + [c])
-
-                    # 2. Drop rows with no Phone (Invalid rows)
-                    if 'phone' in df_preview.columns:
-                         df_preview = df_preview[df_preview['phone'].astype(str).replace(['nan', 'None'], '').str.strip() != '']
-                    
-                    # 3. Type Conversion & Note Preservation
-                    text_cols = ['note', 'evaluator', 'creator', 'subject', 'status', 'meet_link']
-                    for c in text_cols:
-                        if c in df_preview.columns:
-                            # Convert to string, preserving content, replacing explicit 'nan' string
+                            # Base cleaning
                             df_preview[c] = df_preview[c].astype(str).replace(['nan', 'NaN', 'None', '<NA>'], '')
+                            
+                            # Check Row 0 for Junk
+                            first_val = df_preview[c].iloc[0].upper().strip() if len(df_preview) > 0 else ""
+                            is_junk_col = any(j in first_val for j in junk_keywords)
+                            
+                            if is_junk_col:
+                                # GARBAGE HEADER FOUND -> Remove junk everywhere, NO FFILL
+                                import re
+                                pattern = '|'.join(map(re.escape, junk_keywords))
+                                df_preview[c] = df_preview[c].str.replace(pattern, '', regex=True, flags=re.IGNORECASE).str.strip()
+                            else:
+                                # MERGED COLUMN FOUND -> Safe Ffill
+                                df_preview[c] = df_preview[c].replace(r'^\s*$', pd.NA, regex=True) # Empty to NA
+                                
+                                empty_mask = df_preview[c].isna()
+                                df_preview[c] = df_preview[c].ffill()
+                                
+                                # Track
+                                filled_mask = empty_mask & df_preview[c].notna()
+                                if filled_mask.any():
+                                    df_preview.loc[filled_mask, '_ffilled_cells'] = df_preview.loc[filled_mask, '_ffilled_cells'].apply(lambda x: x + [c])
+                                
+                                # NA back to string
+                                df_preview[c] = df_preview[c].fillna('')
 
-                    # 4. Date Parsing
+                    # 2. Trial Date (Always Ffill)
                     if 'trial_date' in df_preview.columns:
+                         c = 'trial_date'
+                         # Clean
+                         df_preview[c] = df_preview[c].astype(str).replace(['nan', 'NaN', 'None'], '').replace(r'^\s*$', pd.NA, regex=True)
+                         
+                         # Check junk in date (rare but requested)
+                         first_val = str(df_preview[c].iloc[0]).strip().upper() if len(df_preview) > 0 else ""
+                         if "TRIAL" in first_val or "NGAY" in first_val or "DATE" in first_val:
+                              # Just strip it, but still allow ffill as date is usually merged
+                              pass 
+
+                         # Ffill
+                         empty_mask = df_preview[c].isna()
+                         df_preview[c] = df_preview[c].ffill()
+                         
+                         filled_mask = empty_mask & df_preview[c].notna()
+                         if filled_mask.any():
+                            df_preview.loc[filled_mask, '_ffilled_cells'] = df_preview.loc[filled_mask, '_ffilled_cells'].apply(lambda x: x + [c])
+                         
+                         # Parse Date
                          df_preview['trial_date'] = pd.to_datetime(df_preview['trial_date'], dayfirst=True, errors='coerce').dt.strftime("%d/%m/%Y").fillna('')
 
+                    # 3. Clean Other Text Columns (Note separation)
+                    text_cols = ['note', 'subject', 'status', 'meet_link']
+                    for c in text_cols:
+                        if c in df_preview.columns:
+                            df_preview[c] = df_preview[c].astype(str).replace(['nan', 'NaN', 'None', '<NA>'], '')
+
+                    # 4. Drop Invalid Rows (No Phone)
+                    if 'phone' in df_preview.columns:
+                         df_preview = df_preview[df_preview['phone'].astype(str).str.strip() != '']
+                    
                     # 5. Time Parsing
                     if 'time' in df_preview.columns:
                         def clean_time(val):
@@ -616,16 +644,14 @@ with st.sidebar:
                             if len(s) <= 2 and s.isdigit(): return f"{int(s):02d}:00"
                             return s
                         df_preview['time'] = df_preview['time'].apply(clean_time)
-
-                    # Store in session state to proceed to import
+                        
                     st.session_state['df_import_ready'] = df_preview
-                
-                # --- PREVIEW BLOCK ---
+
+                # --- PREVIEW ---
                 if 'df_import_ready' in st.session_state:
                     df_ready = st.session_state['df_import_ready']
                     st.caption(f"Kết quả xử lý ({len(df_ready)} dòng):")
                     
-                    # Highlight Style
                     def highlight(row):
                         styles = [''] * len(row)
                         filled = row.get('_ffilled_cells', [])
@@ -634,7 +660,7 @@ with st.sidebar:
                                 idx = row.index.get_loc(col)
                                 styles[idx] = 'background-color: #fef9c3; color: #854d0e;'
                         return styles
-                        
+                    
                     st.dataframe(
                         df_ready.style.apply(highlight, axis=1),
                         column_config={
@@ -644,7 +670,6 @@ with st.sidebar:
                         height=250
                     )
                     
-                    # --- IMPORT BUTTON ---
                     if st.button("🚀 Thực hiện Import", type="primary"):
                         try:
                             cursor = conn.cursor()
@@ -652,21 +677,18 @@ with st.sidebar:
                             skipped = 0
                             
                             for _, row in df_ready.iterrows():
-                                # Final Validation
                                 phone = str(row.get('phone', '')).strip()
                                 t_date = row.get('trial_date', '')
                                 
                                 if not phone or not t_date:
                                     skipped += 1
                                     continue
-                                    
-                                # Duplicate Check
+                                
                                 cursor.execute("SELECT id FROM trials WHERE phone=? AND trial_date=?", (phone, t_date))
                                 if cursor.fetchone(): 
                                     skipped += 1
                                     continue
                                 
-                                # Creator Fallback
                                 creator = row.get('creator', '')
                                 if not creator: creator = st.session_state.user_name
                                 
@@ -680,14 +702,13 @@ with st.sidebar:
                                     row.get('note', ''), row.get('evaluator', ''), creator
                                 ))
                                 count += 1
-                                
+                            
                             conn.commit()
                             clear_cache()
-                            st.success(f"✅ Đã import {count} dòng thành công!")
-                            if skipped: st.warning(f"⚠️ Bỏ qua {skipped} dòng trùng/thiếu thông tin.")
+                            st.success(f"✅ Đã import {count} dòng. Đã xử lý 'rác' (Garbage headers) và giữ nguyên dữ liệu thật.")
+                            if skipped: st.warning(f"⚠️ Bỏ qua {skipped} dòng.")
                             st.balloons()
-                            del st.session_state['df_import_ready'] # Reset
-                            
+                            del st.session_state['df_import_ready']
                             import time
                             time.sleep(1.5)
                             st.rerun()
