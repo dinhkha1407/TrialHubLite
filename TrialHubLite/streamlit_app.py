@@ -149,9 +149,10 @@ def import_trials_from_file(uploaded_file):
         for i, row in df_raw.iterrows():
             row_str = row.astype(str).str.lower().tolist()
             # Look for key columns: STT and (Phone or SĐT or Số điện thoại or Trial)
-            has_stt = any("stt" in x for x in row_str)
-            has_phone = any("phone" in x or "sđt" in x or "số điện thoại" in x for x in row_str)
-            has_trial = any("trial" in x for x in row_str)
+            # More robust check
+            has_stt = any(x in str(s) for s in row_str for x in ["stt", "số thứ tự", "no."])
+            has_phone = any(x in str(s) for s in row_str for x in ["phone", "sđt", "số điện thoại", "tel"])
+            has_trial = any("trial" in str(s) for s in row_str)
             
             if has_stt and (has_phone or has_trial):
                 header_idx = i
@@ -170,37 +171,41 @@ def import_trials_from_file(uploaded_file):
         new_cols = []
         col_counts = {}
         for col in df_import.columns:
-            if col in col_counts:
-                col_counts[col] += 1
-                new_cols.append(f"{col}.{col_counts[col]}")
+            c = str(col).strip()
+            if c in col_counts:
+                col_counts[c] += 1
+                new_cols.append(f"{c}.{col_counts[c]}")
             else:
-                col_counts[col] = 0
-                new_cols.append(col)
+                col_counts[c] = 0
+                new_cols.append(c)
         df_import.columns = new_cols
-
-            
-        # Normalize columns
-        # Map: STT->stt, Ngày/Date->trial_date, Thời gian/Time->time, Link->meet_link, 
-        # Môn/Subject->subject, SĐT/Phone->phone, Tình trạng/Status->status, 
-        # Note/Ghi chú->note, Phụ trách/Evaluator->evaluator, TVV/Creator->creator
         
+        # Normalize columns with expanded keywords
         col_map = {}
-        used_targets = {} # Track usage of target names to avoid duplicates
+        used_targets = {}
         
+        # Keywords mapping
+        keywords = {
+            'stt': ['stt', 'số thứ tự', 'no'],
+            'trial_date': ['ngày', 'date', 'day'],
+            'time': ['thời gian', 'time', 'giờ'],
+            'meet_link': ['link', 'meet', 'zoom', 'url'],
+            'subject': ['môn', 'subject', 'lớp', 'class'],
+            'phone': ['sđt', 'phone', 'số điện thoại', 'tel', 'mobile'],
+            'status': ['tình trạng', 'status', 'trạng thái', 'kết quả'],
+            'note': ['note', 'ghi chú', 'nhận xét', 'comment'],
+            'evaluator': ['phụ trách', 'evaluator', 'người đánh giá', 'gv', 'giáo viên'],
+            'creator': ['tvv', 'creator', 'người tạo', 'sale', 'tư vấn viên']
+        }
+
         for col in df_import.columns:
-            c = str(col).lower().strip()
+            c_lower = str(col).lower().strip()
             target = None
             
-            if 'stt' in c: target = 'stt'
-            elif 'ngày' in c or 'date' in c: target = 'trial_date'
-            elif 'thời gian' in c or 'time' in c: target = 'time'
-            elif 'link' in c: target = 'meet_link'
-            elif 'môn' in c or 'subject' in c: target = 'subject'
-            elif 'sđt' in c or 'phone' in c or 'số điện thoại' in c: target = 'phone'
-            elif 'tình trạng' in c or 'status' in c: target = 'status'
-            elif 'note' in c or 'ghi chú' in c: target = 'note'
-            elif 'phụ trách' in c or 'evaluator' in c: target = 'evaluator'
-            elif 'tvv' in c or 'creator' in c: target = 'creator'
+            for key, kw_list in keywords.items():
+                if any(k in c_lower for k in kw_list):
+                    target = key
+                    break
             
             if target:
                 if target in used_targets:
@@ -213,10 +218,54 @@ def import_trials_from_file(uploaded_file):
         df_import = df_import.rename(columns=col_map)
         
         # Drop empty rows where phone is missing (crucial for valid data)
-        # Note: 'phone' might have been renamed to 'phone_1' if duplicate, but usually STT/Phone are unique.
-        # We check for the primary 'phone' column.
         if 'phone' in df_import.columns:
-            df_import = df_import[df_import['phone'].notna() & (df_import['phone'].astype(str).str.strip() != '')]
+            df_import = df_import[df_import['phone'].notna() & (df_import['phone'].astype(str).str.strip() != '') & (df_import['phone'].astype(str).str.lower() != 'nan')]
+            
+        # --- Robust Date/Time Parsing ---
+        
+        # Parse Date
+        if 'trial_date' in df_import.columns:
+            # First clean strings
+            df_import['trial_date'] = df_import['trial_date'].astype(str).str.strip()
+            # COERCE errors to NaT, assumption: Day First (VN format common)
+            # using format='mixed' allows 2025-10-19 and 19/10/2025 to likely coexist
+            df_import['trial_date_parsed'] = pd.to_datetime(df_import['trial_date'], dayfirst=True, errors='coerce', format='mixed')
+            
+            # Update valid dates to string format for DB: DD/MM/YYYY
+            df_import['trial_date'] = df_import['trial_date_parsed'].dt.strftime("%d/%m/%Y")
+            
+            # Fill NaN
+            df_import['trial_date'] = df_import['trial_date'].fillna('')
+        
+        # Parse Time
+        if 'time' in df_import.columns:
+             # Standardize various inputs: datetime.time, strings like "18h30", "18:00"
+            def clean_time(val):
+                if pd.isna(val) or val == '' or str(val).lower() == 'nan':
+                    return ''
+                
+                # If datetime.time
+                from datetime import time as dt_time
+                if isinstance(val, dt_time):
+                    return val.strftime("%H:%M")
+                
+                s = str(val).lower().strip()
+                s = s.replace('h', ':').replace('g', ':').replace('.', ':')
+                
+                # Check format "HH:MM"
+                try:
+                    # If just "18", assume 18:00? Maybe not safe.
+                    if s.isdigit() and len(s) <= 2:
+                        return f"{int(s):02d}:00"
+                        
+                    t = datetime.strptime(s, "%H:%M")
+                    return t.strftime("%H:%M")
+                except:
+                    # Pass through if robust parser fails, user can edit later
+                    pass
+                return s 
+            
+            df_import['time'] = df_import['time'].apply(clean_time)
             
         # Ensure required columns exist
         required_cols = ['trial_date', 'phone', 'subject', 'status']
@@ -441,50 +490,62 @@ with st.sidebar:
                     try:
                         cursor = conn.cursor()
                         count = 0
+                        skipped = 0
+                        
                         for _, row in df_preview.iterrows():
-                            # Check duplicates (Phone + Date)
+                            # Clean Phone
                             phone = str(row.get('phone', '')).strip()
+                            if phone.lower() == 'nan': phone = ''
                             
-                            # Handle date format variations
+                            # Clean Date
                             t_date = row.get('trial_date', '')
-                            if isinstance(t_date, datetime):
-                                t_date = t_date.strftime("%d/%m/%Y")
-                            else:
-                                t_date = str(t_date).split(' ')[0] # Remove time if present
-                                
-                            # Handle time format (XLSX returns datetime.time)
-                            t_time = row.get('time', '')
-                            from datetime import time as dt_time
-                            if isinstance(t_time, dt_time):
-                                t_time = t_time.strftime("%H:%M")
-                            else:
-                                t_time = str(t_time).strip()
-                                if t_time == 'nan': t_time = ''
-                                
-                            # Simple duplicate check
-                            cursor.execute("SELECT id FROM trials WHERE phone=? AND trial_date=?", (phone, t_date))
-                            if cursor.fetchone():
+                            
+                            # Skip invalid rows
+                            if not phone or not t_date:
+                                skipped += 1
                                 continue
                                 
+                            # Check duplicates (Phone + Date)
+                            cursor.execute("SELECT id FROM trials WHERE phone=? AND trial_date=?", (phone, t_date))
+                            if cursor.fetchone():
+                                skipped += 1
+                                continue
+                            
+                            # Handle Creator (Use file value OR Session User)
+                            creator = row.get('creator', '')
+                            if pd.isna(creator) or str(creator).strip() == '' or str(creator).lower() == 'nan':
+                                creator = st.session_state.user_name
+                            else:
+                                creator = str(creator).strip()
+
                             cursor.execute("""
                                 INSERT INTO trials (stt, trial_date, time, meet_link, subject, phone, status, note, evaluator, creator)
                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """, (
-                                row.get('stt', ''), t_date, t_time, 
-                                row.get('meet_link', ''), row.get('subject', ''), phone, 
-                                row.get('status', 'Chờ trial'), row.get('note', ''), 
-                                row.get('evaluator', ''), st.session_state.user_name
+                                row.get('stt', ''), 
+                                t_date, 
+                                row.get('time', ''), 
+                                row.get('meet_link', ''), 
+                                row.get('subject', ''), 
+                                phone, 
+                                row.get('status', 'Chờ trial'), 
+                                row.get('note', ''), 
+                                row.get('evaluator', ''), 
+                                creator
                             ))
                             count += 1
                         conn.commit()
                         clear_cache() # Clear cache immediately
-                        st.success(f"Đã import thành công {count} dòng!")
+                        
+                        st.success(f"✅ Đã import: {count} dòng.")
+                        if skipped > 0:
+                            st.warning(f"⚠️ Bỏ qua: {skipped} dòng (Do trùng dữ liệu, thiếu ngày/SĐT hoặc định dạng ngày sai).")
+                        
                         st.balloons()
                         st.toast(f"Dữ liệu cập nhật lúc {datetime.now().strftime('%H:%M')}", icon="🕒")
-                        # Sleep briefly to let toast show? No, rerun is fast.
-                        # Using st.rerun() to refresh everything
+                        
                         import time
-                        time.sleep(1) 
+                        time.sleep(1.5) 
                         st.rerun()
                     except Exception as e:
                         st.error(f"Lỗi import: {e}")
