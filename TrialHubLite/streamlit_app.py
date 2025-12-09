@@ -217,7 +217,18 @@ def import_trials_from_file(uploaded_file):
             
         df_import = df_import.rename(columns=col_map)
         
+        # --- Handle Merged Cells (Forward Fill) ---
+        # Columns that typically span multiple rows in Excel (Date, Subject, Creator, etc.)
+        ffill_cols = ['trial_date', 'subject', 'evaluator', 'creator', 'meet_link', 'note', 'time']
+        
+        for c in ffill_cols:
+            if c in df_import.columns:
+                # Replace empty strings/nan strings with actual NaN to fallback
+                df_import[c] = df_import[c].replace(r'^\s*$', pd.NA, regex=True).replace(['nan', 'NaN'], pd.NA)
+                df_import[c] = df_import[c].ffill()
+
         # Drop empty rows where phone is missing (crucial for valid data)
+        # Phone should NOT be ffilled usually (each trial needs a student phone)
         if 'phone' in df_import.columns:
             df_import = df_import[df_import['phone'].notna() & (df_import['phone'].astype(str).str.strip() != '') & (df_import['phone'].astype(str).str.lower() != 'nan')]
             
