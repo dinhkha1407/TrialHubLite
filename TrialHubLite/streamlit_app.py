@@ -401,6 +401,12 @@ with st.sidebar:
 
     # --- 1. Filters ---
     with st.expander("🔍 Bộ lọc danh sách", expanded=True):
+        # Refresh Button
+        if st.button("🔄 Refresh dữ liệu", use_container_width=True):
+            clear_cache()
+            st.toast("Đã reload dữ liệu mới nhất!", icon="✅")
+            st.rerun()
+            
         # Date Range
         filter_date = st.date_input("📅 Khoảng thời gian", [])
         
@@ -419,16 +425,16 @@ with st.sidebar:
         uploaded_file = st.file_uploader("Chọn file .xlsx hoặc .csv", type=['xlsx', 'csv'])
         
         if uploaded_file:
-            df_preview, missing_cols = import_trials_from_file(uploaded_file)
+            df_preview, missing = import_trials_from_file(uploaded_file)
             
-            if isinstance(missing_cols, str):
-                st.error(f"Lỗi đọc file: {missing_cols}")
+            if isinstance(missing, str): # Error message
+                st.error(f"Lỗi đọc file: {missing}")
             else:
                 st.caption("Xem trước 5 dòng đầu:")
                 st.dataframe(df_preview.head(5), height=150)
                 
-                if missing_cols:
-                    st.warning(f"Thiếu cột: {', '.join(missing_cols)}")
+                if missing:
+                    st.warning(f"Thiếu cột: {', '.join(missing)}")
                     st.info("Các cột này sẽ để trống.")
                 
                 if st.button("🚀 Import vào database", type="primary"):
@@ -471,9 +477,15 @@ with st.sidebar:
                             ))
                             count += 1
                         conn.commit()
+                        clear_cache() # Clear cache immediately
                         st.success(f"Đã import thành công {count} dòng!")
                         st.balloons()
-                        # st.rerun() # Let user see message first
+                        st.toast(f"Dữ liệu cập nhật lúc {datetime.now().strftime('%H:%M')}", icon="🕒")
+                        # Sleep briefly to let toast show? No, rerun is fast.
+                        # Using st.rerun() to refresh everything
+                        import time
+                        time.sleep(1) 
+                        st.rerun()
                     except Exception as e:
                         st.error(f"Lỗi import: {e}")
 
