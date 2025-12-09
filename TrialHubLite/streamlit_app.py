@@ -166,8 +166,17 @@ def import_trials_from_file(uploaded_file):
             uploaded_file.seek(0)
             df_import = pd.read_excel(uploaded_file, header=header_idx)
 
-        # Deduplicate columns (handle merged cells or duplicate headers)
-        df_import.columns = pd.io.parsers.ParserBase({'names': df_import.columns})._maybe_dedup_names(df_import.columns)
+        # Deduplicate columns manually
+        new_cols = []
+        col_counts = {}
+        for col in df_import.columns:
+            if col in col_counts:
+                col_counts[col] += 1
+                new_cols.append(f"{col}.{col_counts[col]}")
+            else:
+                col_counts[col] = 0
+                new_cols.append(col)
+        df_import.columns = new_cols
 
             
         # Normalize columns
@@ -176,27 +185,39 @@ def import_trials_from_file(uploaded_file):
         # Note/Ghi chú->note, Phụ trách/Evaluator->evaluator, TVV/Creator->creator
         
         col_map = {}
+        used_targets = {} # Track usage of target names to avoid duplicates
+        
         for col in df_import.columns:
             c = str(col).lower().strip()
-            if 'stt' in c: col_map[col] = 'stt'
-            elif 'ngày' in c or 'date' in c: col_map[col] = 'trial_date'
-            elif 'thời gian' in c or 'time' in c: col_map[col] = 'time'
-            elif 'link' in c: col_map[col] = 'meet_link'
-            elif 'môn' in c or 'subject' in c: col_map[col] = 'subject'
-            elif 'sđt' in c or 'phone' in c: col_map[col] = 'phone'
-            elif 'tình trạng' in c or 'status' in c: col_map[col] = 'status'
-            elif 'note' in c or 'ghi chú' in c: col_map[col] = 'note'
-            elif 'phụ trách' in c or 'evaluator' in c: col_map[col] = 'evaluator'
-            elif 'tvv' in c or 'creator' in c: col_map[col] = 'creator'
+            target = None
+            
+            if 'stt' in c: target = 'stt'
+            elif 'ngày' in c or 'date' in c: target = 'trial_date'
+            elif 'thời gian' in c or 'time' in c: target = 'time'
+            elif 'link' in c: target = 'meet_link'
+            elif 'môn' in c or 'subject' in c: target = 'subject'
+            elif 'sđt' in c or 'phone' in c or 'số điện thoại' in c: target = 'phone'
+            elif 'tình trạng' in c or 'status' in c: target = 'status'
+            elif 'note' in c or 'ghi chú' in c: target = 'note'
+            elif 'phụ trách' in c or 'evaluator' in c: target = 'evaluator'
+            elif 'tvv' in c or 'creator' in c: target = 'creator'
+            
+            if target:
+                if target in used_targets:
+                    used_targets[target] += 1
+                    target = f"{target}_{used_targets[target]}"
+                else:
+                    used_targets[target] = 0
+                col_map[col] = target
             
         df_import = df_import.rename(columns=col_map)
         
         # Drop empty rows where phone is missing (crucial for valid data)
+        # Note: 'phone' might have been renamed to 'phone_1' if duplicate, but usually STT/Phone are unique.
+        # We check for the primary 'phone' column.
         if 'phone' in df_import.columns:
             df_import = df_import[df_import['phone'].notna() & (df_import['phone'].astype(str).str.strip() != '')]
             
-        df_import = df_import.rename(columns=col_map)
-        
         # Ensure required columns exist
         required_cols = ['trial_date', 'phone', 'subject', 'status']
         missing = [c for c in required_cols if c not in df_import.columns]
