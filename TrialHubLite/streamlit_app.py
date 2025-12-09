@@ -568,74 +568,55 @@ with st.sidebar:
                     rename_map = {v: k for k, v in mappings.items()}
                     df_preview = df_preview.rename(columns=rename_map)
                     
-                    # --- DEFINITIVE CLEANING LOGIC ---
-                    junk_keywords = ["CHƯA GỬI ZALO", "CHUA GUI ZALO", "CHƯA GỬI", "TIÊN", "TIEN", "CHUA GUI"]
+                    # --- SIMPLIFIED CLEANING LOGIC (REVERTED) ---
                     df_preview['_ffilled_cells'] = [[] for _ in range(len(df_preview))]
 
-                    # 1. Evaluator & Creator (Conditional Junk Removal OR Ffill)
-                    for c in ['evaluator', 'creator']:
-                        if c in df_preview.columns:
-                            # Base cleaning
-                            df_preview[c] = df_preview[c].astype(str).replace(['nan', 'NaN', 'None', '<NA>'], '')
-                            
-                            # Check Row 0 for Junk
-                            first_val = df_preview[c].iloc[0].upper().strip() if len(df_preview) > 0 else ""
-                            is_junk_col = any(j in first_val for j in junk_keywords)
-                            
-                            if is_junk_col:
-                                # GARBAGE HEADER FOUND -> Remove junk everywhere, NO FFILL
-                                import re
-                                pattern = '|'.join(map(re.escape, junk_keywords))
-                                df_preview[c] = df_preview[c].str.replace(pattern, '', regex=True, flags=re.IGNORECASE).str.strip()
-                            else:
-                                # MERGED COLUMN FOUND -> Safe Ffill
-                                df_preview[c] = df_preview[c].replace(r'^\s*$', pd.NA, regex=True) # Empty to NA
-                                
-                                empty_mask = df_preview[c].isna()
-                                df_preview[c] = df_preview[c].ffill()
-                                
-                                # Track
-                                filled_mask = empty_mask & df_preview[c].notna()
-                                if filled_mask.any():
-                                    df_preview.loc[filled_mask, '_ffilled_cells'] = df_preview.loc[filled_mask, '_ffilled_cells'].apply(lambda x: x + [c])
-                                
-                                # NA back to string
-                                df_preview[c] = df_preview[c].fillna('')
-
-                    # 2. Trial Date (Always Ffill)
+                    # 1. TRIAL DATE (Safe Ffill)
                     if 'trial_date' in df_preview.columns:
-                         c = 'trial_date'
-                         # Clean
-                         df_preview[c] = df_preview[c].astype(str).replace(['nan', 'NaN', 'None'], '').replace(r'^\s*$', pd.NA, regex=True)
-                         
-                         # Check junk in date (rare but requested)
-                         first_val = str(df_preview[c].iloc[0]).strip().upper() if len(df_preview) > 0 else ""
-                         if "TRIAL" in first_val or "NGAY" in first_val or "DATE" in first_val:
-                              # Just strip it, but still allow ffill as date is usually merged
-                              pass 
+                        # Convert to string and clean standard NA
+                        df_preview['trial_date'] = df_preview['trial_date'].astype(str).replace(['nan', 'NaN', 'None', ''], pd.NA)
+                        
+                        # Monitor changes for highlighting
+                        empty_mask_d = df_preview['trial_date'].isna()
+                        
+                        # Ffill
+                        df_preview['trial_date'] = df_preview['trial_date'].ffill()
+                        
+                        # Track filled
+                        filled_mask_d = empty_mask_d & df_preview['trial_date'].notna()
+                        if filled_mask_d.any():
+                             df_preview.loc[filled_mask_d, '_ffilled_cells'] = df_preview.loc[filled_mask_d, '_ffilled_cells'].apply(lambda x: x + ['trial_date'])
 
-                         # Ffill
-                         empty_mask = df_preview[c].isna()
-                         df_preview[c] = df_preview[c].ffill()
-                         
-                         filled_mask = empty_mask & df_preview[c].notna()
-                         if filled_mask.any():
-                            df_preview.loc[filled_mask, '_ffilled_cells'] = df_preview.loc[filled_mask, '_ffilled_cells'].apply(lambda x: x + [c])
-                         
-                         # Parse Date
-                         df_preview['trial_date'] = pd.to_datetime(df_preview['trial_date'], dayfirst=True, errors='coerce').dt.strftime("%d/%m/%Y").fillna('')
+                        # Restore '' for NA
+                        df_preview['trial_date'] = df_preview['trial_date'].fillna('')
+                        
+                        # Parse
+                        df_preview['trial_date'] = pd.to_datetime(df_preview['trial_date'], dayfirst=True, errors='coerce').dt.strftime("%d/%m/%Y").fillna('')
 
-                    # 3. Clean Other Text Columns (Note separation)
-                    text_cols = ['note', 'subject', 'status', 'meet_link']
-                    for c in text_cols:
+                    # 2. EVALUATOR / CREATOR (NO FFILL - Clean Only)
+                    junk_keywords = ["CHƯA GỬI ZALO", "TIỀN", "Chua gui zalo", "Tien", "CHƯA GỬI", "chưa gửi zalo", "TIÊN"]
+                    import re
+                    junk_pattern = '|'.join(map(re.escape, junk_keywords))
+                    
+                    for col in ['evaluator', 'creator']:
+                        if col in df_preview.columns:
+                            # Strip and clean basic NA
+                            s = df_preview[col].astype(str).str.strip().replace(['nan', 'NaN', 'None', '<NA>', ''], '')
+                            # Remove junk
+                            s = s.str.replace(junk_pattern, '', regex=True, flags=re.IGNORECASE).str.strip()
+                            # Assign back (NO FFILL)
+                            df_preview[col] = s
+
+                    # 3. OTHER TEXT COLS (Subject, Status, Note, Meet Link)
+                    for c in ['note', 'subject', 'status', 'meet_link']:
                         if c in df_preview.columns:
-                            df_preview[c] = df_preview[c].astype(str).replace(['nan', 'NaN', 'None', '<NA>'], '')
+                            df_preview[c] = df_preview[c].astype(str).replace(['nan', 'NaN', 'None', '<NA>'], '').str.strip()
 
-                    # 4. Drop Invalid Rows (No Phone)
+                    # 4. PHONE (Values valid check)
                     if 'phone' in df_preview.columns:
                          df_preview = df_preview[df_preview['phone'].astype(str).str.strip() != '']
                     
-                    # 5. Time Parsing
+                    # 5. TIME
                     if 'time' in df_preview.columns:
                         def clean_time(val):
                             s = str(val).lower().strip()
@@ -705,8 +686,8 @@ with st.sidebar:
                             
                             conn.commit()
                             clear_cache()
-                            st.success(f"✅ Đã import {count} dòng. Đã xử lý 'rác' (Garbage headers) và giữ nguyên dữ liệu thật.")
-                            if skipped: st.warning(f"⚠️ Bỏ qua {skipped} dòng.")
+                            st.success(f"✅ Đã import {count} dòng. Date merged cells filled. Evaluator/Creator preserved correctly (empty = None).")
+                            if skipped: st.warning(f"⚠️ Bỏ qua {skipped} dòng trùng/thiếu thông tin.")
                             st.balloons()
                             del st.session_state['df_import_ready']
                             import time
