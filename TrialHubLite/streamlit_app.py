@@ -136,6 +136,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 def import_trials_from_file(uploaded_file):
+    """
+    Reads file, detects header, and allows external mapping.
+    Returns: df_raw (with correct header), error_message
+    """
     try:
         # Read file without header first to find the correct row
         if uploaded_file.name.endswith('.csv'):
@@ -148,12 +152,12 @@ def import_trials_from_file(uploaded_file):
         found = False
         for i, row in df_raw.iterrows():
             row_str = row.astype(str).str.lower().tolist()
-            # More robust check
-            has_stt = any(x in str(s) for s in row_str for x in ["stt", "số thứ tự", "no."])
-            has_phone = any(x in str(s) for s in row_str for x in ["phone", "sđt", "số điện thoại", "tel"])
-            has_trial = any("trial" in str(s) for s in row_str)
+            # Strict keywords for header detection
+            # 'stt' or 'no.' AND 'phone' or 'sđt'
+            has_stt = any(x == str(s).strip().lower() or "số thứ tự" in str(s).lower() or "no." in str(s).lower() for s in row_str for x in ["stt"])
+            has_phone = any("phone" in str(s).lower() or "sđt" in str(s).lower() or "số điện thoại" in str(s).lower() for s in row_str)
             
-            if has_stt and (has_phone or has_trial):
+            if has_stt and has_phone:
                 header_idx = i
                 found = True
                 break
@@ -164,10 +168,9 @@ def import_trials_from_file(uploaded_file):
             df_import = pd.read_csv(uploaded_file, header=header_idx)
         else:
             uploaded_file.seek(0)
-            # keep_default_na=False to better handle empty strings vs actual NaNs
-            df_import = pd.read_excel(uploaded_file, header=header_idx)
-
-        # Deduplicate columns manually
+            df_import = pd.read_excel(uploaded_file, header=header_idx, dtype=str) # Read all as string first to preserve "09..." phone
+            
+        # Deduplicate columns
         new_cols = []
         col_counts = {}
         for col in df_import.columns:
@@ -180,129 +183,142 @@ def import_trials_from_file(uploaded_file):
                 new_cols.append(c)
         df_import.columns = new_cols
         
-        # Normalize columns with expanded keywords
-        col_map = {}
-        used_targets = {}
-        
-        # Keywords mapping (Case-insensitive)
-        keywords = {
-            'stt': ['stt', 'số thứ tự', 'no'],
-            'trial_date': ['ngày', 'date', 'day'],
-            'time': ['thời gian', 'time', 'giờ'],
-            'meet_link': ['link', 'meet', 'zoom', 'url'],
-            'subject': ['môn', 'subject', 'lớp', 'class'],
-            'phone': ['sđt', 'phone', 'số điện thoại', 'tel', 'mobile'],
-            'status': ['tình trạng', 'status', 'trạng thái', 'kết quả'],
-            'note': ['note', 'ghi chú', 'nhận xét', 'comment'],
-            'evaluator': ['phụ trách', 'evaluator', 'người đánh giá', 'gv', 'giáo viên', 'đánh giá'],
-            'creator': ['tvv', 'creator', 'người tạo', 'sale', 'tư vấn viên', 'nguoi tao']
-        }
+        return df_import, None
 
-        for col in df_import.columns:
-            c_lower = str(col).lower().strip()
-            target = None
-            
-            for key, kw_list in keywords.items():
-                if any(k in c_lower for k in kw_list):
-                    target = key
-                    break
-            
-            if target:
-                if target in used_targets:
-                    used_targets[target] += 1
-                    target = f"{target}_{used_targets[target]}"
-                else:
-                    used_targets[target] = 0
-                col_map[col] = target
-            
-        df_import = df_import.rename(columns=col_map)
-        
-        # --- SELECTIVE FFILL (Merged Cells Logic) ---
-        # 1. Forward-fill ONLY these specific columns
-        ffill_cols = ['trial_date', 'creator', 'evaluator']
-        
-        # Track filled cells
-        df_import['_ffilled_cells'] = [[] for _ in range(len(df_import))]
-
-        for c in ffill_cols:
-            if c in df_import.columns:
-                # Ensure emptiness is standard NaN
-                df_import[c] = df_import[c].replace(r'^\s*$', pd.NA, regex=True).replace(['nan', 'NaN', 'None'], pd.NA)
-                
-                # Create mask
-                empty_mask = df_import[c].isna()
-                
-                # Apply fill
-                df_import[c] = df_import[c].ffill()
-                
-                # Identify changes
-                filled_mask = empty_mask & df_import[c].notna()
-                
-                if filled_mask.any():
-                     df_import.loc[filled_mask, '_ffilled_cells'] = df_import.loc[filled_mask, '_ffilled_cells'].apply(lambda x: x + [c])
-                     
-        # Fill remaining NAs with empty string
-        df_import = df_import.fillna('')
-
-        # Drop empty rows where phone is missing (crucial logic)
-        # We don't want to ffill phone, so if it's missing it's invalid
-        if 'phone' in df_import.columns:
-            df_import = df_import[df_import['phone'].astype(str).str.strip() != '']
-            
-        # --- Value Cleaning & Type Conversion ---
-
-        # NOTE Preservation
-        if 'note' in df_import.columns:
-            df_import['note'] = df_import['note'].astype(str)
-            # Replace string 'nan' (case insensitive) with empty, but keep others
-            df_import['note'] = df_import['note'].replace(r'(?i)^nan$', '', regex=True)
-            # Don't strip excessively to preserve format, just None check
-            
-        # SUBJECT Cleaning
-        if 'subject' in df_import.columns:
-             df_import['subject'] = df_import['subject'].astype(str).replace(r'(?i)^nan$', '', regex=True).replace('None', '')
-        
-        # CREATOR/EVALUATOR Cleaning
-        for c in ['creator', 'evaluator']:
-             if c in df_import.columns:
-                 df_import[c] = df_import[c].astype(str).replace(r'(?i)^nan$', '', regex=True).replace('None', '')
-                 
-        # --- Robust Date/Time Parsing ---
-        
-        # Parse Date
-        if 'trial_date' in df_import.columns:
-            df_import['trial_date'] = df_import['trial_date'].astype(str).str.strip()
-            df_import['trial_date_parsed'] = pd.to_datetime(df_import['trial_date'], dayfirst=True, errors='coerce', format='mixed')
-            df_import['trial_date'] = df_import['trial_date_parsed'].dt.strftime("%d/%m/%Y").fillna('')
-        
-        # Parse Time
-        if 'time' in df_import.columns:
-            def clean_time(val):
-                if not val: return ''
-                val_str = str(val).lower().strip()
-                if val_str == 'nan': return ''
-                
-                from datetime import time as dt_time
-                if isinstance(val, dt_time):
-                    return val.strftime("%H:%M")
-                
-                s = val_str.replace('h', ':').replace('g', ':').replace('.', ':')
-                try:
-                    if s.isdigit() and len(s) <= 2: return f"{int(s):02d}:00"
-                    t = datetime.strptime(s, "%H:%M")
-                    return t.strftime("%H:%M")
-                except:
-                    pass
-                return s 
-            
-            df_import['time'] = df_import['time'].apply(clean_time)
-            
-        required_cols = ['trial_date', 'phone', 'subject', 'status']
-        missing = [c for c in required_cols if c not in df_import.columns]
-        
-        return df_import, missing
     except Exception as e:
         return None, str(e)
+
+def identify_column_mapping(columns):
+    """
+    Auto-detects mapping based on keywords.
+    Returns: dict {db_col: file_col}
+    """
+    col_map = {}
+    
+    # Priority Keywords (Exact match preferred)
+    keywords = {
+        'stt': ['stt', 'số thứ tự', 'no.'],
+        'trial_date': ['ngày trial', 'ngày', 'date', 'day'],
+        'time': ['thời gian', 'time', 'giờ'],
+        'meet_link': ['link trial', 'meet link', 'link', 'meet', 'zoom', 'url'],
+        'subject': ['môn học', 'môn', 'subject', 'lớp', 'class'],
+        'phone': ['số điện thoại', 'sđt', 'phone', 'tel', 'mobile', 'hotline'],
+        'status': ['tình trạng', 'status', 'trạng thái', 'kết quả'],
+        'note': ['ghi chú', 'note', 'nhận xét', 'comment', 'lý do'],
+        'evaluator': ['phụ trách đánh giá', 'phụ trách', 'người đánh giá', 'evaluator', 'gv', 'giáo viên', 'đánh giá'],
+        'creator': ['người tạo', 'tvv', 'creator', 'nguoi tao', 'sale', 'tư vấn viên']
+    }
+    
+    # Helper to check match
+    def get_match(targets):
+        # 1. Exact match
+        for col in columns:
+            c_lower = str(col).lower().strip()
+            if c_lower in targets:
+                return col
+        # 2. Contains match
+        for col in columns:
+             c_lower = str(col).lower().strip()
+             if any(t in c_lower for t in targets):
+                 return col
+        return None
+
+    for db_col, kw_list in keywords.items():
+        match = get_match(kw_list)
+        if match:
+             col_map[db_col] = match
+             
+    return col_map
+# --- Database Functions ---
+@st.cache_resource
+def get_connection():
+    return sqlite3.connect("trialhub.db", check_same_thread=False)
+
+def init_db():
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stt TEXT,
+                trial_date TEXT,
+                time TEXT,
+                meet_link TEXT,
+                subject TEXT,
+                phone TEXT,
+                status TEXT,
+                note TEXT,
+                evaluator TEXT,
+                creator TEXT
+            )
+        """)
+        conn.commit()
+    except Exception as e:
+        st.error(f"DB Init Error: {e}")
+
+# Initialize DB on load
+init_db()
+conn = get_connection()
+
+# Use cache_data for performance, invalidate when data changes
+@st.cache_data(ttl=60) 
+def load_data():
+    try:
+        query = "SELECT * FROM trials ORDER BY id DESC"
+        df = pd.read_sql(query, conn)
+        return df
+    except Exception as e:
+        # If table is missing despite init (weird), allow failing gracefully
+        st.error(f"Error loading data: {e}. Attempting to recreate table...")
+        init_db()
+        return pd.DataFrame(columns=['id', 'stt', 'trial_date', 'status', 'subject', 'phone', 'note'])
+
+def clear_cache():
+    load_data.clear()
+
+def identify_column_mapping(columns):
+    """
+    Auto-detects mapping based on keywords.
+    Returns: dict {db_col: file_col}
+    """
+    col_map = {}
+    
+    # Priority Keywords (Exact match preferred)
+    keywords = {
+        'stt': ['stt', 'số thứ tự', 'no.'],
+        'trial_date': ['ngày trial', 'ngày', 'date', 'day'],
+        'time': ['thời gian', 'time', 'giờ'],
+        'meet_link': ['link trial', 'meet link', 'link', 'meet', 'zoom', 'url'],
+        'subject': ['môn học', 'môn', 'subject', 'lớp', 'class'],
+        'phone': ['số điện thoại', 'sđt', 'phone', 'tel', 'mobile', 'hotline'],
+        'status': ['tình trạng', 'status', 'trạng thái', 'kết quả'],
+        'note': ['ghi chú', 'note', 'nhận xét', 'comment', 'lý do'],
+        'evaluator': ['phụ trách đánh giá', 'phụ trách', 'người đánh giá', 'evaluator', 'gv', 'giáo viên', 'đánh giá'],
+        'creator': ['người tạo', 'tvv', 'creator', 'nguoi tao', 'sale', 'tư vấn viên']
+    }
+    
+    # Helper to check match
+    def get_match(targets):
+        # 1. Exact match
+        for col in columns:
+            c_lower = str(col).lower().strip()
+            if c_lower in targets:
+                return col
+        # 2. Contains match
+        for col in columns:
+             c_lower = str(col).lower().strip()
+             if any(t in c_lower for t in targets):
+                 return col
+        return None
+
+    for db_col, kw_list in keywords.items():
+        match = get_match(kw_list)
+        if match:
+             col_map[db_col] = match
+             
+    return col_map
+
 # --- Database Functions ---
 @st.cache_resource
 def get_connection():
@@ -502,131 +518,182 @@ with st.sidebar:
         uploaded_file = st.file_uploader("Chọn file .xlsx hoặc .csv", type=['xlsx', 'csv'])
         
         if uploaded_file:
-            df_preview_raw, missing = import_trials_from_file(uploaded_file)
+            df_raw, err = import_trials_from_file(uploaded_file)
             
-            if isinstance(missing, str): # Error message
-                st.error(f"Lỗi đọc file: {missing}")
+            if err:
+                st.error(f"Lỗi đọc file: {err}")
             else:
-                st.caption("Xem trước (Đã xử lý gộp dòng & chuẩn hóa):")
+                # --- AUTO-MAPPING & MANUAL OVERRIDE ---
+                st.info("💡 Hệ thống tự động nhận diện cột. Vui lòng kiểm tra và sửa nếu cần:")
                 
-                # --- Highlighting Logic for Preview ---
-                def highlight_auto_filled(row):
-                    styles = [''] * len(row)
-                    filled_cols = row.get('_ffilled_cells', [])
-                    if not filled_cols:
-                        return styles
-                    for col_name in filled_cols:
-                        try:
-                            idx = row.index.get_loc(col_name)
-                            styles[idx] = 'background-color: #fef9c3; color: #854d0e; font-style: italic;' 
-                        except:
-                            pass
-                    return styles
-
-                # Create styled object
-                try:
-                    # Config columns to show nicely
-                    # Hide _ffilled_cells column, make Note column wide
-                    styler = df_preview_raw.style.apply(highlight_auto_filled, axis=1)
+                # Detected
+                auto_map = identify_column_mapping(df_raw.columns)
+                
+                # UI for mapping
+                cols = st.columns(4)
+                
+                mappings = {}
+                db_fields = {
+                    'trial_date': '📅 Ngày Trial',
+                    'time': '⏰ Thời gian',
+                    'phone': '📞 Số điện thoại',
+                    'note': '📝 Ghi chú (Note)',
+                    'evaluator': '👨‍🏫 Người đánh giá',
+                    'creator': '👤 Người tạo (TVV)',
+                    'subject': '📚 Môn học',
+                    'meet_link': '🔗 Link Meet',
+                    'status': '📊 Trạng thái'
+                }
+                
+                valid_columns = ["(Bỏ qua)"] + list(df_raw.columns)
+                
+                count = 0
+                for db_col, label in db_fields.items():
+                    with cols[count % 4]:
+                        default_idx = 0
+                        if db_col in auto_map:
+                            if auto_map[db_col] in df_raw.columns:
+                                default_idx = valid_columns.index(auto_map[db_col])
+                        
+                        selected = st.selectbox(label, valid_columns, index=default_idx, key=f"map_{db_col}")
+                        if selected != "(Bỏ qua)":
+                            mappings[db_col] = selected
+                    count += 1
+                
+                st.markdown("---")
+                
+                if st.button("👁️ Xem trước & Xử lý số liệu"):
+                    # Apply Mapping
+                    df_preview = df_raw.copy()
                     
+                    rename_map = {v: k for k, v in mappings.items()}
+                    df_preview = df_preview.rename(columns=rename_map)
+                    
+                    # --- CLEANING LOGIC ---
+                    
+                    # 1. FFILL (Strict: Date, Creator, Evaluator)
+                    # Helper for merged cells
+                    ffill_cols = ['trial_date', 'creator', 'evaluator']
+                    df_preview['_ffilled_cells'] = [[] for _ in range(len(df_preview))]
+
+                    for c in ffill_cols:
+                        if c in df_preview.columns:
+                            # Replace nan/empty string with NA
+                            df_preview[c] = df_preview[c].replace(r'^\s*$', pd.NA, regex=True).replace(['nan', 'NaN', 'None'], pd.NA)
+                            
+                            # Record empty cells before filling
+                            empty_mask = df_preview[c].isna()
+                            
+                            # FFILL
+                            df_preview[c] = df_preview[c].ffill()
+                            
+                            # Ffilled mask
+                            filled_mask = empty_mask & df_preview[c].notna()
+                            if filled_mask.any():
+                                df_preview.loc[filled_mask, '_ffilled_cells'] = df_preview.loc[filled_mask, '_ffilled_cells'].apply(lambda x: x + [c])
+
+                    # 2. Drop rows with no Phone (Invalid rows)
+                    if 'phone' in df_preview.columns:
+                         df_preview = df_preview[df_preview['phone'].astype(str).replace(['nan', 'None'], '').str.strip() != '']
+                    
+                    # 3. Type Conversion & Note Preservation
+                    text_cols = ['note', 'evaluator', 'creator', 'subject', 'status', 'meet_link']
+                    for c in text_cols:
+                        if c in df_preview.columns:
+                            # Convert to string, preserving content, replacing explicit 'nan' string
+                            df_preview[c] = df_preview[c].astype(str).replace(['nan', 'NaN', 'None', '<NA>'], '')
+
+                    # 4. Date Parsing
+                    if 'trial_date' in df_preview.columns:
+                         df_preview['trial_date'] = pd.to_datetime(df_preview['trial_date'], dayfirst=True, errors='coerce').dt.strftime("%d/%m/%Y").fillna('')
+
+                    # 5. Time Parsing
+                    if 'time' in df_preview.columns:
+                        def clean_time(val):
+                            s = str(val).lower().strip()
+                            if s in ['nan', 'none', '']: return ''
+                            s = s.replace('h', ':').replace('g', ':').replace('.', ':')
+                            if len(s) <= 2 and s.isdigit(): return f"{int(s):02d}:00"
+                            return s
+                        df_preview['time'] = df_preview['time'].apply(clean_time)
+
+                    # Store in session state to proceed to import
+                    st.session_state['df_import_ready'] = df_preview
+                
+                # --- PREVIEW BLOCK ---
+                if 'df_import_ready' in st.session_state:
+                    df_ready = st.session_state['df_import_ready']
+                    st.caption(f"Kết quả xử lý ({len(df_ready)} dòng):")
+                    
+                    # Highlight Style
+                    def highlight(row):
+                        styles = [''] * len(row)
+                        filled = row.get('_ffilled_cells', [])
+                        for col in filled:
+                            if col in row.index:
+                                idx = row.index.get_loc(col)
+                                styles[idx] = 'background-color: #fef9c3; color: #854d0e;'
+                        return styles
+                        
                     st.dataframe(
-                        styler, 
-                        height=200, 
-                        use_container_width=True,
+                        df_ready.style.apply(highlight, axis=1),
                         column_config={
-                            '_ffilled_cells': None, # Hide
+                            '_ffilled_cells': None,
                             'note': st.column_config.TextColumn("Ghi chú", width="medium"),
-                            'evaluator': st.column_config.TextColumn("Người đánh giá"),
-                            'creator': st.column_config.TextColumn("Người tạo")
-                        }
+                        },
+                        height=250
                     )
                     
-                    # Count total auto-filled
-                    total_filled = df_preview_raw['_ffilled_cells'].apply(len).sum()
-                    if total_filled > 0:
-                        st.info(f"✨ Đã tự động điền {total_filled} ô bị trống do gộp dòng (Màu vàng nhạt).")
-                        
-                except Exception as ex:
-                    st.dataframe(df_preview_raw.head(5)) # Fallback
-                
-                if missing:
-                    st.warning(f"Thiếu cột: {', '.join(missing)}")
-                    st.info("Các cột này sẽ để trống.")
-
-                # Check specifically for Note/Evaluator presence
-                warn_missing = []
-                if 'note' not in df_preview_raw.columns: warn_missing.append("Note / Ghi chú")
-                if 'evaluator' not in df_preview_raw.columns: warn_missing.append("Evaluator / Phụ trách")
-                
-                if warn_missing:
-                    st.warning(f"⚠️ Cảnh báo: Không tìm thấy cột {', '.join(warn_missing)}! Hãy kiểm tra tên cột trong file Excel.")
-                
-                if st.button("🚀 Import vào database", type="primary"):
-                    try:
-                        cursor = conn.cursor()
-                        count = 0
-                        skipped = 0
-                        
-                        for _, row in df_preview_raw.iterrows():
-                            # Clean Phone
-                            phone = str(row.get('phone', '')).strip()
-                            if phone.lower() == 'nan': phone = ''
+                    # --- IMPORT BUTTON ---
+                    if st.button("🚀 Thực hiện Import", type="primary"):
+                        try:
+                            cursor = conn.cursor()
+                            count = 0
+                            skipped = 0
                             
-                            # Clean Date
-                            t_date = row.get('trial_date', '')
-                            
-                            # Skip invalid rows
-                            if not phone or not t_date:
-                                skipped += 1
-                                continue
+                            for _, row in df_ready.iterrows():
+                                # Final Validation
+                                phone = str(row.get('phone', '')).strip()
+                                t_date = row.get('trial_date', '')
                                 
-                            # Check duplicates (Phone + Date)
-                            cursor.execute("SELECT id FROM trials WHERE phone=? AND trial_date=?", (phone, t_date))
-                            if cursor.fetchone():
-                                skipped += 1
-                                continue
+                                if not phone or not t_date:
+                                    skipped += 1
+                                    continue
+                                    
+                                # Duplicate Check
+                                cursor.execute("SELECT id FROM trials WHERE phone=? AND trial_date=?", (phone, t_date))
+                                if cursor.fetchone(): 
+                                    skipped += 1
+                                    continue
+                                
+                                # Creator Fallback
+                                creator = row.get('creator', '')
+                                if not creator: creator = st.session_state.user_name
+                                
+                                cursor.execute("""
+                                    INSERT INTO trials (stt, trial_date, time, meet_link, subject, phone, status, note, evaluator, creator)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """, (
+                                    row.get('stt', ''), t_date, row.get('time', ''), 
+                                    row.get('meet_link', ''), row.get('subject', ''), 
+                                    phone, row.get('status', 'Chờ trial'), 
+                                    row.get('note', ''), row.get('evaluator', ''), creator
+                                ))
+                                count += 1
+                                
+                            conn.commit()
+                            clear_cache()
+                            st.success(f"✅ Đã import {count} dòng thành công!")
+                            if skipped: st.warning(f"⚠️ Bỏ qua {skipped} dòng trùng/thiếu thông tin.")
+                            st.balloons()
+                            del st.session_state['df_import_ready'] # Reset
                             
-                            # Handle Creator
-                            creator = row.get('creator', '')
-                            if not creator: 
-                                creator = st.session_state.user_name
-                            else:
-                                creator = str(creator).strip()
-
-                            cursor.execute("""
-                                INSERT INTO trials (stt, trial_date, time, meet_link, subject, phone, status, note, evaluator, creator)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """, (
-                                row.get('stt', ''), 
-                                t_date, 
-                                row.get('time', ''), 
-                                row.get('meet_link', ''), 
-                                row.get('subject', ''), 
-                                phone, 
-                                row.get('status', 'Chờ trial'), 
-                                row.get('note', ''), 
-                                row.get('evaluator', ''), 
-                                creator
-                            ))
-                            count += 1
-                        conn.commit()
-                        clear_cache() # Clear cache immediately
-                        
-                        st.success(f"✅ Đã import thành công: {count} dòng.")
-                        st.info(f"ℹ️ Tự động điền dữ liệu ô gộp cho {total_filled} ô.")
-                        st.caption("Note & Evaluator preserved.")
-
-                        if skipped > 0:
-                            st.warning(f"⚠️ Bỏ qua: {skipped} dòng (Do trùng dữ liệu hoặc thiếu thông tin).")
-                        
-                        st.balloons()
-                        st.toast(f"Dữ liệu cập nhật lúc {datetime.now().strftime('%H:%M')}", icon="🕒")
-                        
-                        import time
-                        time.sleep(1.5) 
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Lỗi import: {e}")
+                            import time
+                            time.sleep(1.5)
+                            st.rerun()
+                            
+                        except Exception as e:
+                            st.error(f"Lỗi database: {e}")
 
     st.markdown("---")
 
